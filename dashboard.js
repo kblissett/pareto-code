@@ -2,12 +2,21 @@
 
 const X_TICKS = [0, 0.03, 0.1, 0.3, 1, 3, 10, 30];
 const FULL_Y_TICKS = [0, 20, 40, 60, 80, 100];
-const FOCUSED_Y_FLOOR = 45;
 const X_FLOOR = 0.03;
 const X_CEILING = 30;
+const METRICS = {
+  coding_agent: { scoreKey: "coding_agent_index", label: "Artificial Analysis Coding Agent Index", shortLabel: "Coding Agent Index", chartShort: "Agent Index" },
+  coding: { scoreKey: "coding_index", label: "Artificial Analysis Coding Index", shortLabel: "Coding Index", chartShort: "Coding Index" },
+  model_terminal_bench: { scoreKey: "model_terminal_bench_score", label: "Terminal-Bench v2.1 · AA model evaluation", shortLabel: "Model Terminal-Bench", chartShort: "Model TB" },
+  scicode: { scoreKey: "scicode_score", label: "SciCode · AA model evaluation", shortLabel: "SciCode", chartShort: "SciCode" },
+  coding_agent_deep_swe: { scoreKey: "coding_agent_deep_swe_score", label: "DeepSWE · Coding Agent Index run", shortLabel: "Agent DeepSWE", chartShort: "Agent DeepSWE" },
+  coding_agent_terminal_bench: { scoreKey: "coding_agent_terminal_bench_score", label: "Terminal-Bench v2.1 · Coding Agent Index run", shortLabel: "Agent Terminal-Bench", chartShort: "Agent TB" },
+  coding_agent_swe_atlas_qna: { scoreKey: "coding_agent_swe_atlas_qna_score", label: "SWE-Atlas-QnA · Coding Agent Index run", shortLabel: "Agent SWE-Atlas-QnA", chartShort: "Agent SWE" },
+};
 
 const state = {
   data: null,
+  metric: "coding_agent",
   query: "",
   provider: "all",
   frontierOnly: false,
@@ -40,9 +49,10 @@ function ratioText(mix) {
   return `${ratio.cached_input} : ${ratio.uncached_input} : ${ratio.output}`;
 }
 function providerLabel(value) { return value.split("-").map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(" "); }
-function modelScore(model) { return model.coding_agent_index; }
+function metricSpec() { return METRICS[state.metric]; }
+function modelScore(model) { return model[metricSpec().scoreKey]; }
 function modelPrice(model) { return model.blended_price; }
-function isFrontier(model) { return Boolean(model.is_frontier); }
+function isFrontier(model) { return (model.frontier_metrics ?? []).includes(state.metric); }
 function scoreText(value) { return value == null ? "—" : value.toFixed(1); }
 function clamp(value, minimum, maximum) { return Math.min(maximum, Math.max(minimum, value)); }
 
@@ -61,7 +71,13 @@ function xPercent(price) {
 
 function focusedCeiling() {
   const scores = state.data.models.map(modelScore).filter((score) => score != null);
-  return Math.max(70, Math.ceil(Math.max(...scores) / 5) * 5);
+  return Math.max(focusedFloor() + 20, Math.ceil(Math.max(...scores, 0) / 5) * 5);
+}
+
+function focusedFloor() {
+  const reference = state.data.meta.reference_model[metricSpec().scoreKey];
+  if (reference == null) return 40;
+  return Math.max(0, Math.floor(reference / 5) * 5 - 15);
 }
 
 function yPercent(score, floor, ceiling) {
@@ -70,7 +86,7 @@ function yPercent(score, floor, ceiling) {
 
 function focusedTicks(ceiling) {
   const ticks = [];
-  for (let tick = FOCUSED_Y_FLOOR; tick <= ceiling; tick += 5) ticks.push(tick);
+  for (let tick = focusedFloor(); tick <= ceiling; tick += 5) ticks.push(tick);
   return ticks;
 }
 
@@ -98,18 +114,19 @@ function agentSetup(model) {
 function renderSummary() {
   const { meta, models } = state.data;
   const mix = meta.token_mix;
-  const threshold = meta.reference_model.coding_agent_index;
+  const spec = metricSpec();
+  const threshold = meta.reference_model[spec.scoreKey];
   const above = models.filter((model) => !model.is_supplemental && modelScore(model) != null && modelScore(model) >= threshold).length;
-  $("#data-date").textContent = `OpenRouter through ${meta.usage_end_date} · AA Coding Agent Index v${meta.artificial_analysis_version}`;
+  $("#data-date").textContent = `OpenRouter through ${meta.usage_end_date} · AA model data v${meta.artificial_analysis_model_version} · Coding Agent Index v${meta.artificial_analysis_version}`;
   $("#summary").innerHTML = `
-    <div><span>AA-index scored</span><strong>${meta.scored_model_count}</strong></div>
-    <div><span>At / above Opus 4.8 (max)</span><strong>${above}</strong></div>
-    <div><span>Pareto frontier</span><strong>${meta.frontier_count}</strong></div>
+    <div><span>${escapeHtml(spec.shortLabel)} scored</span><strong>${meta.performance_metrics[state.metric].scored_model_count}</strong></div>
+    <div><span>At / above Opus 4.8 (max)</span><strong>${threshold == null ? "—" : above}</strong></div>
+    <div><span>${escapeHtml(spec.shortLabel)} Pareto frontier</span><strong>${meta.performance_metrics[state.metric].frontier_count}</strong></div>
     <div><span>Cached : uncached : output blend</span><strong>${ratioText(mix)}</strong></div>`;
   $("#legend").innerHTML = `
     <span><i class="legend-dot"></i> Model</span><span><i class="legend-dot frontier"></i> Frontier</span>
     <span><i class="legend-interest"></i> Tracked</span><span><i class="legend-promo"></i> Promo</span>
-    <span><i class="legend-line"></i> Opus 4.8 max (${scoreText(threshold)})</span>`;
+    ${threshold == null ? "" : `<span><i class="legend-line"></i> Opus 4.8 max (${scoreText(threshold)})</span>`}`;
 }
 
 function tooltipHtml(model) {
@@ -118,8 +135,15 @@ function tooltipHtml(model) {
   const promo = model.promotion_discount == null ? "" : ` · ${Math.round(model.promotion_discount * 100)}% promo`;
   const note = model.is_interest ? '<p class="tooltip-note">Tracked model</p>' : "";
   return `<strong>${escapeHtml(model.name)}</strong><span>${rank}${tracked}${promo}</span><dl>
-    <div><dt>AA agent index</dt><dd>${scoreText(modelScore(model))}</dd></div>
+    <div><dt>Coding Agent Index</dt><dd>${scoreText(model.coding_agent_index)}</dd></div>
+    <div><dt>Agent · DeepSWE</dt><dd>${scoreText(model.coding_agent_deep_swe_score)}</dd></div>
+    <div><dt>Agent · Terminal-Bench</dt><dd>${scoreText(model.coding_agent_terminal_bench_score)}</dd></div>
+    <div><dt>Agent · SWE-Atlas</dt><dd>${scoreText(model.coding_agent_swe_atlas_qna_score)}</dd></div>
     <div><dt>Agent setup</dt><dd>${escapeHtml(agentSetup(model))}</dd></div>
+    <div><dt>Coding Index</dt><dd>${scoreText(model.coding_index)}</dd></div>
+    <div><dt>Model · Terminal-Bench</dt><dd>${scoreText(model.model_terminal_bench_score)}</dd></div>
+    <div><dt>Model · SciCode</dt><dd>${scoreText(model.scicode_score)}</dd></div>
+    <div><dt>Model effort</dt><dd>${escapeHtml(model.model_evaluation_effort ?? "—")}</dd></div>
     <div><dt>AA run cost</dt><dd>${money(model.coding_agent_source_cost)}/task</dd></div>
     <div><dt>Economic blend</dt><dd>${money(modelPrice(model))}/M</dd></div>
     ${model.is_free_endpoint ? `<div><dt>Catalog charge</dt><dd>${money(model.catalog_blended_price)}/M (free)</dd></div>` : ""}
@@ -227,10 +251,11 @@ function placeFrontierLabels(models, plotted, floor, ceiling) {
 }
 
 function renderChart(models) {
-  const floor = state.showFullRange ? 0 : FOCUSED_Y_FLOOR;
+  const spec = metricSpec();
+  const floor = state.showFullRange ? 0 : focusedFloor();
   const ceiling = state.showFullRange ? 100 : focusedCeiling();
   const ticks = state.showFullRange ? FULL_Y_TICKS : focusedTicks(ceiling);
-  const threshold = state.data.meta.reference_model.coding_agent_index;
+  const threshold = state.data.meta.reference_model[spec.scoreKey];
   const plotted = models.filter((model) => modelScore(model) != null && modelPrice(model) != null && modelScore(model) >= floor);
   const frontier = state.data.models.filter((model) => isFrontier(model) && modelScore(model) != null && modelPrice(model) != null && modelScore(model) >= floor).sort((a, b) => modelPrice(a) - modelPrice(b));
   const plottedIds = new Set(plotted.map((model) => model.id));
@@ -240,20 +265,24 @@ function renderChart(models) {
 
   $("#near-range").setAttribute("aria-pressed", String(!state.showFullRange));
   $("#full-range").setAttribute("aria-pressed", String(state.showFullRange));
-  $("#chart-subtitle").textContent = `${state.showFullRange ? "All scored models" : "Focused on the Opus 4.8 neighborhood"} · highest published thinking level · 200:7:1 token blend · log price scale`;
+  $("#chart-title").textContent = `${spec.label} vs. traffic economics`;
+  $("#chart-subtitle").textContent = `${state.showFullRange ? "All scored models" : "Focused on the Opus 4.8 neighborhood"} · ${spec.shortLabel} frontier · 200:7:1 token blend · log price scale`;
+  $("#y-title").textContent = spec.label;
 
   const plot = $("#plot");
   plot.innerHTML = [
     ...ticks.map((tick) => `<div class="y-grid" style="top:${yPercent(tick, floor, ceiling)}%"><span>${tick}</span></div>`),
     ...X_TICKS.map((tick) => `<div class="x-grid" style="left:${xPercent(tick)}%"><span>${money(tick)}</span></div>`),
-    `<div class="reference-line" style="top:${yPercent(threshold, floor, ceiling)}%"><span>Opus 4.8 max · ${scoreText(threshold)}</span></div>`,
+    threshold != null && threshold >= floor && threshold <= ceiling
+      ? `<div class="reference-line" style="top:${yPercent(threshold, floor, ceiling)}%"><span>Opus 4.8 max · ${scoreText(threshold)}</span></div>`
+      : "",
     `<svg class="frontier-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${path}"></path></svg>`,
     ...plotted.map((model) => {
       const classes = ["model-point", isFrontier(model) && "frontier", model.is_interest && "interest", model.is_promotional && "promo", state.activeId === model.id && "active"].filter(Boolean).join(" ");
-      return `<button type="button" class="${classes}" data-model-id="${escapeHtml(model.id)}" style="left:${xPercent(modelPrice(model))}%;top:${yPercent(modelScore(model), floor, ceiling)}%" aria-label="${escapeHtml(`${model.name}, AA Coding Agent Index ${scoreText(modelScore(model))}, ${money(modelPrice(model))} per million usage tokens`)}"></button>`;
+      return `<button type="button" class="${classes}" data-model-id="${escapeHtml(model.id)}" style="left:${xPercent(modelPrice(model))}%;top:${yPercent(modelScore(model), floor, ceiling)}%" aria-label="${escapeHtml(`${model.name}, ${spec.label} ${scoreText(modelScore(model))}, ${money(modelPrice(model))} per million usage tokens`)}"></button>`;
     }),
     ...plotted.filter((model) => model.is_interest).map((model) => `<span aria-hidden="true" class="interest-label ${model.is_supplemental ? "supplemental" : ""}" style="left:${xPercent(modelPrice(model))}%;top:${yPercent(modelScore(model), floor, ceiling)}%">${escapeHtml(model.chart_label ?? model.name)}</span>`),
-    ...labeledFrontier.map((model) => `<i aria-hidden="true" class="frontier-leader" data-frontier-leader-id="${escapeHtml(model.id)}"></i><button type="button" class="frontier-label ${state.activeId === model.id ? "active" : ""}" data-frontier-label-id="${escapeHtml(model.id)}" aria-label="Inspect ${escapeHtml(model.name)}"><span>${escapeHtml(chartModelLabel(model))}</span><small>${scoreText(modelScore(model))} AA <b>·</b> ${money(modelPrice(model))}/M</small></button>`),
+    ...labeledFrontier.map((model) => `<i aria-hidden="true" class="frontier-leader" data-frontier-leader-id="${escapeHtml(model.id)}"></i><button type="button" class="frontier-label ${state.activeId === model.id ? "active" : ""}" data-frontier-label-id="${escapeHtml(model.id)}" aria-label="Inspect ${escapeHtml(model.name)}"><span>${escapeHtml(chartModelLabel(model))}</span><small>${scoreText(modelScore(model))} ${escapeHtml(spec.chartShort)} <b>·</b> ${money(modelPrice(model))}/M</small></button>`),
     focused && modelScore(focused) != null && modelPrice(focused) != null && modelScore(focused) >= floor
       ? `<div class="chart-tooltip" style="left:${Math.min(78, Math.max(3, xPercent(modelPrice(focused))))}%;top:${Math.min(72, Math.max(2, yPercent(modelScore(focused), floor, ceiling) + 3))}%">${tooltipHtml(focused)}</div>`
       : "",
@@ -273,7 +302,7 @@ function renderChart(models) {
 
 function badges(model) {
   return [
-    isFrontier(model) ? '<span class="frontier-badge">Frontier</span>' : "",
+    isFrontier(model) ? `<span class="frontier-badge" title="${escapeHtml(metricSpec().shortLabel)} Pareto frontier">Frontier</span>` : "",
     model.is_interest ? '<span class="interest-badge">Tracked</span>' : "",
     model.promotion_discount != null ? `<span class="promo-badge">Promo ${Math.round(model.promotion_discount * 100)}% off</span>` : "",
     !model.on_openrouter ? '<span class="external-badge">Off OpenRouter</span>' : "",
@@ -286,8 +315,15 @@ function renderTable(models, plottedCount) {
     <td class="rank">${model.weekly_usage_rank == null ? "—" : `#${model.weekly_usage_rank}`}</td>
     <td><div class="model-name">${escapeHtml(model.name)}${badges(model)}</div><code>${escapeHtml(model.id)}</code></td>
     <td>${escapeHtml(providerLabel(model.provider))}</td>
-    <td class="number score" title="${escapeHtml(model.coding_agent_variant ?? "No Artificial Analysis Coding Agent Index result")}">${modelScore(model) == null ? "—" : scoreText(modelScore(model))}</td>
-    <td>${escapeHtml(agentSetup(model))}</td>
+    <td class="number score agent-eval" title="${escapeHtml(model.coding_agent_variant ?? "No Artificial Analysis Coding Agent Index result")}">${scoreText(model.coding_agent_index)}</td>
+    <td class="number score agent-eval" title="DeepSWE from the selected Coding Agent Index model–agent–effort row">${scoreText(model.coding_agent_deep_swe_score)}</td>
+    <td class="number score agent-eval" title="Terminal-Bench v2.1 from the selected Coding Agent Index model–agent–effort row">${scoreText(model.coding_agent_terminal_bench_score)}</td>
+    <td class="number score agent-eval" title="SWE-Atlas-QnA from the selected Coding Agent Index model–agent–effort row">${scoreText(model.coding_agent_swe_atlas_qna_score)}</td>
+    <td class="agent-eval">${escapeHtml(agentSetup(model))}</td>
+    <td class="number score model-eval" title="Artificial Analysis Coding Index: two-thirds model Terminal-Bench v2.1 plus one-third SciCode">${scoreText(model.coding_index)}</td>
+    <td class="number score model-eval" title="Terminal-Bench v2.1 from Artificial Analysis's model evaluation">${scoreText(model.model_terminal_bench_score)}</td>
+    <td class="number score model-eval" title="SciCode from Artificial Analysis's model evaluation">${scoreText(model.scicode_score)}</td>
+    <td class="model-eval" title="${escapeHtml(model.model_evaluation_variant ?? "No Artificial Analysis model evaluation")}">${escapeHtml(model.model_evaluation_effort ?? "—")}</td>
     <td class="number" title="${escapeHtml(model.price_note ?? "")}">${money(modelPrice(model))}</td>
     <td class="number muted-cell">${model.context_length ? compact(model.context_length) : "—"}</td>
     <td class="number muted-cell" title="${model.on_openrouter ? `${model.observed_days_30d} daily top-50 appearances` : "Not available on OpenRouter"}">${model.observed_tokens_30d ? compact(model.observed_tokens_30d) : "—"}</td>
@@ -298,7 +334,7 @@ function renderTable(models, plottedCount) {
   }));
   $("#empty-state").hidden = models.length !== 0;
   const frontierCount = models.filter((model) => isFrontier(model)).length;
-  $("#table-status").textContent = `${models.length} shown · ${plottedCount} in chart · ${frontierCount} frontier`;
+  $("#table-status").textContent = `${models.length} shown · ${plottedCount} in ${metricSpec().shortLabel} chart · ${frontierCount} frontier`;
 }
 
 function renderMethodology() {
@@ -306,11 +342,13 @@ function renderMethodology() {
   const mix = meta.token_mix;
   const threshold = meta.reference_model.coding_agent_index;
   $("#methodology").innerHTML = `
-    <p><strong>One performance measure.</strong> Performance is the <a href="${escapeHtml(meta.artificial_analysis_source_url)}">Artificial Analysis Coding Agent Index</a> v${escapeHtml(meta.artificial_analysis_version)}, an equal-weight composite of DeepSWE, Terminal-Bench v2.1, and SWE-Atlas-QnA. For models published at several reasoning levels, this dashboard selects the highest level (<code>max</code> above <code>xhigh</code>, and so on); at the same level it prefers AA’s default row, then the higher-scoring harness. The separate DeepSWE and older AA Coding Index views have been removed. The Opus 4.8 (max) reference is ${threshold.toFixed(1)}.</p>
+    <p><strong>Performance views.</strong> The default is the <a href="${escapeHtml(meta.artificial_analysis_source_url)}">Artificial Analysis Coding Agent Index</a> v${escapeHtml(meta.artificial_analysis_version)}, an equal-weight composite of DeepSWE, Terminal-Bench v2.1, and SWE-Atlas-QnA. The selector also exposes the Artificial Analysis Coding Index and both sets of components. All seven measures use a 0–100, higher-is-better scale, and every view computes its own price/performance Pareto frontier. The Opus 4.8 (max) Coding Agent Index reference is ${threshold == null ? "unavailable" : threshold.toFixed(1)}.</p>
+    <p><strong>Two Terminal-Bench results.</strong> <em>Model · Terminal-Bench v2.1</em> is Artificial Analysis’s model-level evaluation and supplies two-thirds of the Coding Index; SciCode supplies the other third. The composite uses AA’s full-precision inputs before the table rounds each displayed value to one decimal. <em>Agent · Terminal-Bench v2.1</em> is the result from the exact model–agent–effort row selected for the Coding Agent Index. The table groups and labels them separately because they are different runs in different evaluation contexts.</p>
+    <p><strong>Score selection and provenance.</strong> Every benchmark input is fetched directly from Artificial Analysis; OpenRouter’s benchmark fields are ignored. For AA model evaluations and Coding Agent Index results published at several reasoning levels, this dashboard selects the highest level. At the same level it prefers AA’s default row and then the higher score. Coding Agent Index components come from that exact selected agent row. The Coding Index is calculated from AA’s directly published Terminal-Bench v2.1 and SciCode results using their current 16% and 8% Intelligence Index weights, normalized within AA’s 24% Coding category.</p>
     <p><strong>Population and price.</strong> Models without advertised tool calling are excluded before taking OpenRouter’s top 100 <code>top-weekly</code> ordering. The cost axis uses a fixed ${ratioText(mix)} cached-input, uncached-input, and output token ratio: ${percent(mix.cached_input_share)} cached input, ${percent(mix.uncached_input_share)} uncached input, and ${percent(mix.output_share)} output. OpenRouter’s traffic-weighted effective input price is separated using its observed cache-hit rate and catalog cache-read ratio. These are underlying traffic economics, not necessarily endpoint charges; <code>:free</code> endpoints still cost the OpenRouter user $0. The Pareto frontier includes ranked models with both an AA score and an effective price.</p>
     <p><strong>Tracked models.</strong> Tracked catalog models remain visible outside the top 100 and do not alter the ranked frontier.</p>
-    <p><strong>Coverage.</strong> ${meta.scored_model_count} of ${meta.model_count} ranked models have a mapped Coding Agent Index result; AA currently publishes ${meta.artificial_analysis_row_count} model–agent–effort rows. Observed 30-day tokens are lower bounds because OpenRouter’s daily dataset exposes only the top 50 models per day. Promotion badges come from OpenRouter’s <a href="${escapeHtml(meta.promotional_pricing_source)}">Discounted Models collection</a>.</p>
-    <p>Source: <a href="${escapeHtml(meta.source_url)}">OpenRouter rankings</a>, as of ${escapeHtml(meta.usage_as_of)}.</p>`;
+    <p><strong>Coverage.</strong> ${meta.performance_metrics.coding_agent.scored_model_count} of ${meta.model_count} ranked models have a mapped Coding Agent Index result, while ${meta.performance_metrics.coding.scored_model_count} have both model-level Coding Index components. AA currently publishes ${meta.artificial_analysis_model_row_count} model evaluation rows and ${meta.artificial_analysis_row_count} model–agent–effort rows. Observed 30-day tokens are lower bounds because OpenRouter’s daily dataset exposes only the top 50 models per day. Promotion badges come from OpenRouter’s <a href="${escapeHtml(meta.promotional_pricing_source)}">Discounted Models collection</a>.</p>
+    <p>Performance: <a href="${escapeHtml(meta.artificial_analysis_model_source_url)}">Artificial Analysis model evaluations</a> and <a href="${escapeHtml(meta.artificial_analysis_source_url)}">Coding Agent Index</a>. Population, usage, and price: <a href="${escapeHtml(meta.source_url)}">OpenRouter rankings</a>, as of ${escapeHtml(meta.usage_as_of)}.</p>`;
 }
 
 function render() {
@@ -326,12 +364,13 @@ function bindControls() {
   $("#search").addEventListener("input", (event) => { state.query = event.target.value; render(); });
   $("#provider").addEventListener("change", (event) => { state.provider = event.target.value; render(); });
   $("#frontier-only").addEventListener("change", (event) => { state.frontierOnly = event.target.checked; render(); });
+  $("#metric").addEventListener("change", (event) => { state.metric = event.target.value; state.activeId = null; state.hoverId = null; render(); });
   $("#sort").addEventListener("change", (event) => { state.sort = event.target.value; render(); });
   $("#near-range").addEventListener("click", () => { state.showFullRange = false; render(); });
   $("#full-range").addEventListener("click", () => { state.showFullRange = true; render(); });
   $("#reset").addEventListener("click", () => {
-    Object.assign(state, { query: "", provider: "all", frontierOnly: false });
-    $("#search").value = ""; $("#provider").value = "all"; $("#frontier-only").checked = false;
+    Object.assign(state, { query: "", provider: "all", frontierOnly: false, metric: "coding_agent" });
+    $("#search").value = ""; $("#provider").value = "all"; $("#frontier-only").checked = false; $("#metric").value = "coding_agent";
     render();
   });
   let resizeFrame = null;
