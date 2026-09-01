@@ -44,6 +44,13 @@ function modelScore(model) { return model.coding_agent_index; }
 function modelPrice(model) { return model.blended_price; }
 function isFrontier(model) { return Boolean(model.is_frontier); }
 function scoreText(value) { return value == null ? "—" : value.toFixed(1); }
+function clamp(value, minimum, maximum) { return Math.min(maximum, Math.max(minimum, value)); }
+
+function chartModelLabel(model) {
+  if (model.chart_label) return model.chart_label;
+  const separator = model.name.indexOf(": ");
+  return separator === -1 ? model.name : model.name.slice(separator + 2);
+}
 
 function xPercent(price) {
   const value = Math.log10(price + X_FLOOR);
@@ -109,14 +116,12 @@ function tooltipHtml(model) {
   const rank = model.weekly_usage_rank == null ? "Supplemental · not OpenRouter-ranked" : `#${model.weekly_usage_rank} usage rank`;
   const tracked = model.is_interest ? " · tracked" : "";
   const promo = model.promotion_discount == null ? "" : ` · ${Math.round(model.promotion_discount * 100)}% promo`;
-  const note = model.is_interest
-    ? `<p class="tooltip-note">${model.price_kind === "cache_mix_estimate" ? "Off OpenRouter · fixed-blend price estimate" : "Tracked model"}</p>`
-    : "";
+  const note = model.is_interest ? '<p class="tooltip-note">Tracked model</p>' : "";
   return `<strong>${escapeHtml(model.name)}</strong><span>${rank}${tracked}${promo}</span><dl>
     <div><dt>AA agent index</dt><dd>${scoreText(modelScore(model))}</dd></div>
     <div><dt>Agent setup</dt><dd>${escapeHtml(agentSetup(model))}</dd></div>
     <div><dt>AA run cost</dt><dd>${money(model.coding_agent_source_cost)}/task</dd></div>
-    <div><dt>${model.price_kind === "cache_mix_estimate" ? "Est. blend" : "Economic blend"}</dt><dd>${money(modelPrice(model))}/M</dd></div>
+    <div><dt>Economic blend</dt><dd>${money(modelPrice(model))}/M</dd></div>
     ${model.is_free_endpoint ? `<div><dt>Catalog charge</dt><dd>${money(model.catalog_blended_price)}/M (free)</dd></div>` : ""}
     <div><dt>Uncached input</dt><dd>${money(model.effective_uncached_input_price)}/M</dd></div>
     <div><dt>Cached input</dt><dd>${money(model.effective_cached_input_price)}/M</dd></div>
@@ -136,6 +141,91 @@ function updateTooltip(floor, ceiling) {
   $("#plot").append(tooltip);
 }
 
+function overlapArea(first, second, padding = 6) {
+  const width = Math.max(0, Math.min(first.x + first.width + padding, second.x + second.width) - Math.max(first.x, second.x - padding));
+  const height = Math.max(0, Math.min(first.y + first.height + padding, second.y + second.height) - Math.max(first.y, second.y - padding));
+  return width * height;
+}
+
+function placeFrontierLabels(models, plotted, floor, ceiling) {
+  const plot = $("#plot");
+  const width = plot.clientWidth;
+  const height = plot.clientHeight;
+  if (!width || !height) return;
+
+  const occupied = [];
+  const points = plotted.map((model) => ({
+    id: model.id,
+    x: width * xPercent(modelPrice(model)) / 100,
+    y: height * yPercent(modelScore(model), floor, ceiling) / 100,
+  }));
+
+  models.slice().sort((a, b) => xPercent(modelPrice(a)) - xPercent(modelPrice(b))).forEach((model) => {
+    const label = plot.querySelector(`[data-frontier-label-id="${CSS.escape(model.id)}"]`);
+    const leader = plot.querySelector(`[data-frontier-leader-id="${CSS.escape(model.id)}"]`);
+    if (!label || !leader) return;
+
+    const labelWidth = label.offsetWidth;
+    const labelHeight = label.offsetHeight;
+    const pointX = width * xPercent(modelPrice(model)) / 100;
+    const pointY = height * yPercent(modelScore(model), floor, ceiling) / 100;
+    const gap = 15;
+    const candidates = [
+      { x: pointX + gap, y: pointY - labelHeight / 2 },
+      { x: pointX - labelWidth - gap, y: pointY - labelHeight / 2 },
+      { x: pointX - labelWidth / 2, y: pointY - labelHeight - gap },
+      { x: pointX - labelWidth / 2, y: pointY + gap },
+      { x: pointX + gap, y: pointY - labelHeight - 8 },
+      { x: pointX - labelWidth - gap, y: pointY - labelHeight - 8 },
+      { x: pointX + gap, y: pointY + 8 },
+      { x: pointX - labelWidth - gap, y: pointY + 8 },
+    ];
+    [-30, 30, -60, 60, -90, 90, -120, 120].forEach((shift) => {
+      candidates.push(
+        { x: pointX + gap, y: pointY - labelHeight / 2 + shift },
+        { x: pointX - labelWidth - gap, y: pointY - labelHeight / 2 + shift },
+      );
+    });
+
+    const scored = candidates.map((candidate) => {
+      const rectangle = {
+        x: clamp(candidate.x, 4, Math.max(4, width - labelWidth - 4)),
+        y: clamp(candidate.y, 4, Math.max(4, height - labelHeight - 4)),
+        width: labelWidth,
+        height: labelHeight,
+      };
+      const labelOverlap = occupied.reduce((sum, placed) => sum + overlapArea(rectangle, placed), 0);
+      const coveredPoints = points.filter((point) => point.id !== model.id
+        && point.x >= rectangle.x - 8 && point.x <= rectangle.x + rectangle.width + 8
+        && point.y >= rectangle.y - 8 && point.y <= rectangle.y + rectangle.height + 8).length;
+      const clampDistance = Math.abs(rectangle.x - candidate.x) + Math.abs(rectangle.y - candidate.y);
+      const centerX = rectangle.x + rectangle.width / 2;
+      const centerY = rectangle.y + rectangle.height / 2;
+      const leaderDistance = Math.hypot(centerX - pointX, centerY - pointY);
+      return {
+        rectangle,
+        penalty: labelOverlap * 1000 + coveredPoints * 50000 + clampDistance * 30 + leaderDistance,
+      };
+    }).sort((a, b) => a.penalty - b.penalty);
+
+    const rectangle = scored[0].rectangle;
+    occupied.push(rectangle);
+    label.style.left = `${rectangle.x}px`;
+    label.style.top = `${rectangle.y}px`;
+    label.style.visibility = "visible";
+
+    const anchorX = clamp(pointX, rectangle.x, rectangle.x + rectangle.width);
+    const anchorY = clamp(pointY, rectangle.y, rectangle.y + rectangle.height);
+    const deltaX = anchorX - pointX;
+    const deltaY = anchorY - pointY;
+    leader.style.left = `${pointX}px`;
+    leader.style.top = `${pointY}px`;
+    leader.style.width = `${Math.hypot(deltaX, deltaY)}px`;
+    leader.style.transform = `rotate(${Math.atan2(deltaY, deltaX)}rad)`;
+    leader.style.visibility = "visible";
+  });
+}
+
 function renderChart(models) {
   const floor = state.showFullRange ? 0 : FOCUSED_Y_FLOOR;
   const ceiling = state.showFullRange ? 100 : focusedCeiling();
@@ -143,6 +233,8 @@ function renderChart(models) {
   const threshold = state.data.meta.reference_model.coding_agent_index;
   const plotted = models.filter((model) => modelScore(model) != null && modelPrice(model) != null && modelScore(model) >= floor);
   const frontier = state.data.models.filter((model) => isFrontier(model) && modelScore(model) != null && modelPrice(model) != null && modelScore(model) >= floor).sort((a, b) => modelPrice(a) - modelPrice(b));
+  const plottedIds = new Set(plotted.map((model) => model.id));
+  const labeledFrontier = frontier.filter((model) => plottedIds.has(model.id));
   const focused = state.data.models.find((model) => model.id === (state.hoverId ?? state.activeId));
   const path = frontier.map((model, index) => `${index ? "L" : "M"} ${xPercent(modelPrice(model))} ${yPercent(modelScore(model), floor, ceiling)}`).join(" ");
 
@@ -157,22 +249,24 @@ function renderChart(models) {
     `<div class="reference-line" style="top:${yPercent(threshold, floor, ceiling)}%"><span>Opus 4.8 max · ${scoreText(threshold)}</span></div>`,
     `<svg class="frontier-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${path}"></path></svg>`,
     ...plotted.map((model) => {
-      const classes = ["model-point", isFrontier(model) && "frontier", model.is_interest && "interest", model.is_promotional && "promo", model.price_kind === "cache_mix_estimate" && "estimate", state.activeId === model.id && "active"].filter(Boolean).join(" ");
+      const classes = ["model-point", isFrontier(model) && "frontier", model.is_interest && "interest", model.is_promotional && "promo", state.activeId === model.id && "active"].filter(Boolean).join(" ");
       return `<button type="button" class="${classes}" data-model-id="${escapeHtml(model.id)}" style="left:${xPercent(modelPrice(model))}%;top:${yPercent(modelScore(model), floor, ceiling)}%" aria-label="${escapeHtml(`${model.name}, AA Coding Agent Index ${scoreText(modelScore(model))}, ${money(modelPrice(model))} per million usage tokens`)}"></button>`;
     }),
     ...plotted.filter((model) => model.is_interest).map((model) => `<span aria-hidden="true" class="interest-label ${model.is_supplemental ? "supplemental" : ""}" style="left:${xPercent(modelPrice(model))}%;top:${yPercent(modelScore(model), floor, ceiling)}%">${escapeHtml(model.chart_label ?? model.name)}</span>`),
+    ...labeledFrontier.map((model) => `<i aria-hidden="true" class="frontier-leader" data-frontier-leader-id="${escapeHtml(model.id)}"></i><button type="button" class="frontier-label ${state.activeId === model.id ? "active" : ""}" data-frontier-label-id="${escapeHtml(model.id)}" aria-label="Inspect ${escapeHtml(model.name)}"><span>${escapeHtml(chartModelLabel(model))}</span><small>${scoreText(modelScore(model))} AA <b>·</b> ${money(modelPrice(model))}/M</small></button>`),
     focused && modelScore(focused) != null && modelPrice(focused) != null && modelScore(focused) >= floor
       ? `<div class="chart-tooltip" style="left:${Math.min(78, Math.max(3, xPercent(modelPrice(focused))))}%;top:${Math.min(72, Math.max(2, yPercent(modelScore(focused), floor, ceiling) + 3))}%">${tooltipHtml(focused)}</div>`
       : "",
   ].join("");
 
-  plot.querySelectorAll("[data-model-id]").forEach((point) => {
-    const id = point.dataset.modelId;
-    point.addEventListener("mouseenter", () => { state.hoverId = id; updateTooltip(floor, ceiling); });
-    point.addEventListener("mouseleave", () => { state.hoverId = null; updateTooltip(floor, ceiling); });
-    point.addEventListener("focus", () => { state.hoverId = id; updateTooltip(floor, ceiling); });
-    point.addEventListener("blur", () => { state.hoverId = null; updateTooltip(floor, ceiling); });
-    point.addEventListener("click", () => { state.activeId = state.activeId === id ? null : id; state.hoverId = null; render(); });
+  placeFrontierLabels(labeledFrontier, plotted, floor, ceiling);
+  plot.querySelectorAll("[data-model-id], [data-frontier-label-id]").forEach((target) => {
+    const id = target.dataset.modelId ?? target.dataset.frontierLabelId;
+    target.addEventListener("mouseenter", () => { state.hoverId = id; updateTooltip(floor, ceiling); });
+    target.addEventListener("mouseleave", () => { state.hoverId = null; updateTooltip(floor, ceiling); });
+    target.addEventListener("focus", () => { state.hoverId = id; updateTooltip(floor, ceiling); });
+    target.addEventListener("blur", () => { state.hoverId = null; updateTooltip(floor, ceiling); });
+    target.addEventListener("click", () => { state.activeId = state.activeId === id ? null : id; state.hoverId = null; render(); });
   });
   return plotted.length;
 }
@@ -194,7 +288,7 @@ function renderTable(models, plottedCount) {
     <td>${escapeHtml(providerLabel(model.provider))}</td>
     <td class="number score" title="${escapeHtml(model.coding_agent_variant ?? "No Artificial Analysis Coding Agent Index result")}">${modelScore(model) == null ? "—" : scoreText(modelScore(model))}</td>
     <td>${escapeHtml(agentSetup(model))}</td>
-    <td class="number" title="${escapeHtml(model.price_note ?? "")}">${money(modelPrice(model))}${model.price_kind === "cache_mix_estimate" ? "<sup>est.</sup>" : ""}</td>
+    <td class="number" title="${escapeHtml(model.price_note ?? "")}">${money(modelPrice(model))}</td>
     <td class="number muted-cell">${model.context_length ? compact(model.context_length) : "—"}</td>
     <td class="number muted-cell" title="${model.on_openrouter ? `${model.observed_days_30d} daily top-50 appearances` : "Not available on OpenRouter"}">${model.observed_tokens_30d ? compact(model.observed_tokens_30d) : "—"}</td>
   </tr>`).join("");
@@ -214,7 +308,7 @@ function renderMethodology() {
   $("#methodology").innerHTML = `
     <p><strong>One performance measure.</strong> Performance is the <a href="${escapeHtml(meta.artificial_analysis_source_url)}">Artificial Analysis Coding Agent Index</a> v${escapeHtml(meta.artificial_analysis_version)}, an equal-weight composite of DeepSWE, Terminal-Bench v2.1, and SWE-Atlas-QnA. For models published at several reasoning levels, this dashboard selects the highest level (<code>max</code> above <code>xhigh</code>, and so on); at the same level it prefers AA’s default row, then the higher-scoring harness. The separate DeepSWE and older AA Coding Index views have been removed. The Opus 4.8 (max) reference is ${threshold.toFixed(1)}.</p>
     <p><strong>Population and price.</strong> Models without advertised tool calling are excluded before taking OpenRouter’s top 100 <code>top-weekly</code> ordering. The cost axis uses a fixed ${ratioText(mix)} cached-input, uncached-input, and output token ratio: ${percent(mix.cached_input_share)} cached input, ${percent(mix.uncached_input_share)} uncached input, and ${percent(mix.output_share)} output. OpenRouter’s traffic-weighted effective input price is separated using its observed cache-hit rate and catalog cache-read ratio. These are underlying traffic economics, not necessarily endpoint charges; <code>:free</code> endpoints still cost the OpenRouter user $0. The Pareto frontier includes ranked models with both an AA score and an effective price.</p>
-    <p><strong>Tracked models.</strong> Tracked catalog models remain visible outside the top 100. Muse Contributor shares the Muse Spark 1.2 checkpoint and selected AA agent result; its price uses <a href="https://developer.meta.com/ai/resources/blog/build-with-muse-code/">Meta API pricing</a> and the same fixed token mix. Tracked models do not alter the ranked frontier.</p>
+    <p><strong>Tracked models.</strong> Tracked catalog models remain visible outside the top 100 and do not alter the ranked frontier.</p>
     <p><strong>Coverage.</strong> ${meta.scored_model_count} of ${meta.model_count} ranked models have a mapped Coding Agent Index result; AA currently publishes ${meta.artificial_analysis_row_count} model–agent–effort rows. Observed 30-day tokens are lower bounds because OpenRouter’s daily dataset exposes only the top 50 models per day. Promotion badges come from OpenRouter’s <a href="${escapeHtml(meta.promotional_pricing_source)}">Discounted Models collection</a>.</p>
     <p>Source: <a href="${escapeHtml(meta.source_url)}">OpenRouter rankings</a>, as of ${escapeHtml(meta.usage_as_of)}.</p>`;
 }
@@ -239,6 +333,11 @@ function bindControls() {
     Object.assign(state, { query: "", provider: "all", frontierOnly: false });
     $("#search").value = ""; $("#provider").value = "all"; $("#frontier-only").checked = false;
     render();
+  });
+  let resizeFrame = null;
+  window.addEventListener("resize", () => {
+    cancelAnimationFrame(resizeFrame);
+    resizeFrame = requestAnimationFrame(render);
   });
 }
 

@@ -61,17 +61,21 @@ input:focus, select:focus, button:focus-visible { border-color: var(--blue); box
 .y-title { position: absolute; left: 17px; top: 17px; color: var(--muted); font-size: 10px; writing-mode: vertical-rl; transform: rotate(180deg); }
 .frontier-line { position: absolute; inset: 0; z-index: 1; width: 100%; height: 100%; overflow: visible; pointer-events: none; }
 .frontier-line path { fill: none; stroke: var(--blue); stroke-width: .5; vector-effect: non-scaling-stroke; opacity: .7; }
-.model-point { position: absolute; z-index: 2; width: 10px; height: 10px; margin: -5px 0 0 -5px; padding: 0; border: 1.5px solid #fff; border-radius: 50%; background: var(--point); box-shadow: 0 0 0 1px rgba(29,36,48,.35); cursor: pointer; transition: transform 80ms ease; }
+.model-point { position: absolute; z-index: 4; width: 10px; height: 10px; margin: -5px 0 0 -5px; padding: 0; border: 1.5px solid #fff; border-radius: 50%; background: var(--point); box-shadow: 0 0 0 1px rgba(29,36,48,.35); cursor: pointer; transition: transform 80ms ease; }
 .model-point:hover, .model-point:focus-visible, .model-point.active { z-index: 5; transform: scale(1.65); background: #111827; outline: none; }
 .model-point.frontier { width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; background: #fff; border: 3px solid var(--blue); box-shadow: 0 0 0 1px #fff; }
 .model-point.frontier:hover, .model-point.frontier:focus-visible, .model-point.frontier.active { background: var(--blue); }
 .model-point.interest { z-index: 4; width: 13px; height: 13px; margin: -6.5px 0 0 -6.5px; border: 2px solid #fff; border-radius: 2px; background: var(--interest); box-shadow: 0 0 0 1px var(--interest); transform: rotate(45deg); }
 .model-point.interest:hover, .model-point.interest:focus-visible, .model-point.interest.active { z-index: 6; background: #5b21b6; transform: rotate(45deg) scale(1.55); }
-.model-point.interest.estimate { background: #fff; border: 3px solid var(--interest); }
-.model-point.interest.estimate:hover, .model-point.interest.estimate:focus-visible, .model-point.interest.estimate.active { background: #ede9fe; }
 .model-point.promo { box-shadow: 0 0 0 2px #16a34a; }
 .interest-label { position: absolute; z-index: 3; margin: 10px 0 0 9px; padding: 1px 3px; color: #5b21b6; background: rgba(255,255,255,.88); font-size: 9px; font-weight: 650; line-height: 1.25; white-space: nowrap; pointer-events: none; }
 .interest-label.supplemental { margin-top: -22px; }
+.frontier-leader { position: absolute; z-index: 2; height: 1px; visibility: hidden; background: linear-gradient(90deg, rgba(37,99,235,.75), rgba(147,197,253,.7)); box-shadow: 0 0 0 .25px rgba(255,255,255,.8); transform-origin: 0 50%; pointer-events: none; }
+.frontier-label { position: absolute; z-index: 5; min-width: 108px; max-width: 172px; visibility: hidden; display: grid; gap: 2px; padding: 6px 8px 6px 9px; border: 1px solid #bfdbfe; border-left: 3px solid var(--blue); border-radius: 6px; color: #1e3a8a; background: rgba(255,255,255,.96); box-shadow: 0 3px 10px rgba(37,99,235,.12), 0 1px 2px rgba(15,23,42,.08); text-align: left; cursor: pointer; backdrop-filter: blur(4px); transition: border-color 100ms ease, box-shadow 100ms ease, transform 100ms ease; }
+.frontier-label span { overflow: hidden; font-size: 10px; font-weight: 720; line-height: 1.18; letter-spacing: -.01em; text-overflow: ellipsis; white-space: nowrap; }
+.frontier-label small { color: #64748b; font-size: 8px; font-weight: 620; line-height: 1.1; white-space: nowrap; }
+.frontier-label small b { padding: 0 2px; color: #93a3b8; font-weight: 500; }
+.frontier-label:hover, .frontier-label:focus-visible, .frontier-label.active { z-index: 7; border-color: #60a5fa; color: #1d4ed8; background: #fff; box-shadow: 0 6px 16px rgba(37,99,235,.2), 0 1px 3px rgba(15,23,42,.1); outline: none; transform: translateY(-1px); }
 .chart-tooltip { position: absolute; z-index: 10; width: 220px; padding: 11px; background: #111827; color: #fff; border-radius: 5px; pointer-events: none; box-shadow: 0 8px 22px rgba(17,24,39,.2); }
 .chart-tooltip strong { display: block; font-size: 12px; line-height: 1.35; }
 .chart-tooltip > span { display: block; margin: 3px 0 9px; color: #9ca3af; font-size: 10px; }
@@ -107,7 +111,6 @@ td code { display: block; margin-top: 3px; color: #8a93a3; font-size: 9px; }
 .external-badge { color: #475467; background: #eef0f3; }
 .score { font-weight: 650; }
 .muted-cell { color: #596273; }
-td sup { margin-left: 3px; color: var(--interest); font-size: 8px; font-weight: 700; vertical-align: top; }
 .empty-state { padding: 42px; text-align: center; color: var(--muted); }
 footer { padding: 18px 2px 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
 footer p { max-width: 1100px; margin: 0 0 4px; }
@@ -128,6 +131,9 @@ footer strong { color: #475467; }
   .controls-panel label:not(.check-field) { flex: 1; min-width: 135px; }
   .controls-panel .search-field { flex-basis: 100%; }
   .chart-wrap { height: 420px; padding-left: 54px; }
+  .frontier-label { min-width: 0; max-width: 126px; padding: 4px 6px; border-left-width: 2px; }
+  .frontier-label span { font-size: 8px; }
+  .frontier-label small { display: none; }
   .panel-header { align-items: start; }
   .chart-panel .panel-header { flex-direction: column; }
   .x-grid:nth-of-type(2), .x-grid:nth-of-type(4), .x-grid:nth-of-type(6) { display: none; }
