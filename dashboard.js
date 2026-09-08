@@ -4,7 +4,7 @@ const X_TICKS = [0, 0.03, 0.1, 0.3, 1, 3, 10, 30];
 const FULL_Y_TICKS = [0, 20, 40, 60, 80, 100];
 const X_FLOOR = 0.03;
 const X_CEILING = 30;
-const FILTERED_LABEL_LIMIT = 10;
+const CLOSE_ALTERNATIVE_LIMIT = 5;
 const COST_MODES = {
   token: {
     key: "blended_price",
@@ -142,10 +142,6 @@ function filteredModels() {
   });
 }
 
-function hasActiveModelFilters() {
-  return state.query.trim() !== "" || state.provider !== "all" || state.frontierOnly;
-}
-
 function agentSetup(model) {
   if (!model.coding_agent_harness) return "—";
   return model.coding_agent_effort
@@ -175,7 +171,8 @@ function renderSummary() {
     <div><span>${escapeHtml(spec.shortLabel)} Pareto frontier</span><strong>${frontierIds().size}</strong></div>
     <div><span>Cost basis</span><strong>${escapeHtml(cost.shortLabel)}</strong></div>`;
   $("#legend").innerHTML = `
-    <span><i class="legend-dot"></i> Model</span><span><i class="legend-dot frontier"></i> Frontier</span>
+    <span><i class="legend-dot"></i> Other scored models</span><span><i class="legend-number frontier">1</i> Frontier</span>
+    <span><i class="legend-number alternative">A</i> Close alternative</span>
     <span><i class="legend-promo"></i> Promo</span>
     ${threshold == null ? "" : `<span><i class="legend-line"></i> Opus 4.8 max (${scoreText(threshold)})</span>`}`;
 }
@@ -183,22 +180,11 @@ function renderSummary() {
 function tooltipHtml(model) {
   const rank = `#${model.weekly_usage_rank} usage rank`;
   const promo = model.promotion_discount == null ? "" : ` · ${Math.round(model.promotion_discount * 100)}% promo`;
-  return `<strong>${escapeHtml(model.name)}</strong><span>${rank}${promo}</span><dl>
-    <div><dt>Coding Agent Index</dt><dd>${scoreText(model.coding_agent_index)}</dd></div>
-    <div><dt>Agent · DeepSWE</dt><dd>${scoreText(model.coding_agent_deep_swe_score)}</dd></div>
-    <div><dt>Agent · Terminal-Bench</dt><dd>${scoreText(model.coding_agent_terminal_bench_score)}</dd></div>
-    <div><dt>Agent · SWE-Atlas</dt><dd>${scoreText(model.coding_agent_swe_atlas_qna_score)}</dd></div>
-    <div><dt>Agent setup</dt><dd>${escapeHtml(agentSetup(model))}</dd></div>
-    <div><dt>Coding Index</dt><dd>${scoreText(model.coding_index)}</dd></div>
-    <div><dt>Model · Terminal-Bench</dt><dd>${scoreText(model.model_terminal_bench_score)}</dd></div>
-    <div><dt>Model · SciCode</dt><dd>${scoreText(model.scicode_score)}</dd></div>
-    <div><dt>Model effort</dt><dd>${escapeHtml(model.model_evaluation_effort ?? "—")}</dd></div>
-    <div><dt>AA run cost</dt><dd>${money(model.coding_agent_source_cost)}/task</dd></div>
-    <div><dt>Economic blend</dt><dd>${money(model.blended_price)}/M</dd></div>
-    ${model.is_free_endpoint ? `<div><dt>Catalog charge</dt><dd>${money(model.catalog_blended_price)}/M (free)</dd></div>` : ""}
-    <div><dt>Uncached input</dt><dd>${money(model.effective_uncached_input_price)}/M</dd></div>
-    <div><dt>Cached input</dt><dd>${money(model.effective_cached_input_price)}/M</dd></div>
-    <div><dt>Output</dt><dd>${money(model.effective_output_price)}/M</dd></div>
+  return `<strong>${escapeHtml(model.name)}</strong><span>${escapeHtml(providerLabel(model.provider))} · ${rank}${promo}</span><dl>
+    <div><dt>${escapeHtml(metricSpec().shortLabel)}</dt><dd>${scoreText(modelScore(model))}</dd></div>
+    <div><dt>${escapeHtml(costSpec().shortLabel)}</dt><dd>${money(modelCost(model))}${state.costMode === "token" ? "/M" : "/task"}</dd></div>
+    <div><dt>Observed 30d</dt><dd>${model.observed_tokens_30d ? compact(model.observed_tokens_30d) : "—"} tokens</dd></div>
+    <div><dt>Position</dt><dd>${isFrontier(model) ? "Pareto frontier" : "Other scored model"}</dd></div>
   </dl>`;
 }
 
@@ -220,119 +206,49 @@ function updateTooltip(plotted, floor, ceiling) {
   tooltip.style.top = `${clamp(pointY, 4, maximumTop)}px`;
 }
 
-function overlapArea(first, second, padding = 6) {
-  const width = Math.max(0, Math.min(first.x + first.width + padding, second.x + second.width) - Math.max(first.x, second.x - padding));
-  const height = Math.max(0, Math.min(first.y + first.height + padding, second.y + second.height) - Math.max(first.y, second.y - padding));
-  return width * height;
+function valueGap(model) {
+  const bestAtOrBelow = Math.max(...state.data.models
+    .filter((candidate) => modelScore(candidate) != null && modelCost(candidate) != null && modelCost(candidate) <= modelCost(model))
+    .map(modelScore));
+  return bestAtOrBelow - modelScore(model);
 }
 
-function placePointLabels(models, plotted, floor, ceiling) {
-  const plot = $("#plot");
-  const width = plot.clientWidth;
-  const height = plot.clientHeight;
-  if (!width || !height) return;
-
-  plot.querySelectorAll("[data-model-leader-id], [data-model-label-id]").forEach((element) => {
-    element.style.visibility = "hidden";
-  });
-
-  const occupied = [];
-  const points = plotted.map((model) => ({
-    id: model.id,
-    x: width * xPercent(modelCost(model)) / 100,
-    y: height * yPercent(modelScore(model), floor, ceiling) / 100,
-  }));
-
-  models.forEach((model) => {
-    const label = plot.querySelector(`[data-model-label-id="${CSS.escape(model.id)}"]`);
-    const leader = plot.querySelector(`[data-model-leader-id="${CSS.escape(model.id)}"]`);
-    if (!label || !leader) return;
-
-    const labelWidth = label.offsetWidth;
-    const labelHeight = label.offsetHeight;
-    const pointX = width * xPercent(modelCost(model)) / 100;
-    const pointY = height * yPercent(modelScore(model), floor, ceiling) / 100;
-    const gap = 15;
-    const candidates = [
-      { x: pointX + gap, y: pointY - labelHeight / 2 },
-      { x: pointX - labelWidth - gap, y: pointY - labelHeight / 2 },
-      { x: pointX - labelWidth / 2, y: pointY - labelHeight - gap },
-      { x: pointX - labelWidth / 2, y: pointY + gap },
-      { x: pointX + gap, y: pointY - labelHeight - 8 },
-      { x: pointX - labelWidth - gap, y: pointY - labelHeight - 8 },
-      { x: pointX + gap, y: pointY + 8 },
-      { x: pointX - labelWidth - gap, y: pointY + 8 },
-    ];
-    [-30, 30, -60, 60, -90, 90, -120, 120].forEach((shift) => {
-      candidates.push(
-        { x: pointX + gap, y: pointY - labelHeight / 2 + shift },
-        { x: pointX - labelWidth - gap, y: pointY - labelHeight / 2 + shift },
-      );
+function indexedModels(plotted) {
+  const frontier = plotted.filter((model) => isFrontier(model)).sort((a, b) => modelCost(a) - modelCost(b));
+  const usedCoordinates = new Set(frontier.map((model) => `${modelCost(model).toPrecision(5)}:${modelScore(model).toFixed(2)}`));
+  const alternatives = [];
+  plotted.filter((model) => !isFrontier(model))
+    .map((model) => ({ model, gap: valueGap(model) }))
+    .filter(({ gap }) => gap > 0.05)
+    .sort((a, b) => a.gap - b.gap || (a.model.weekly_usage_rank ?? Infinity) - (b.model.weekly_usage_rank ?? Infinity))
+    .forEach(({ model }) => {
+      if (alternatives.length >= CLOSE_ALTERNATIVE_LIMIT) return;
+      const coordinates = `${modelCost(model).toPrecision(5)}:${modelScore(model).toFixed(2)}`;
+      if (usedCoordinates.has(coordinates)) return;
+      usedCoordinates.add(coordinates);
+      alternatives.push(model);
     });
-
-    const lastGridX = Math.max(4, width - labelWidth - 4);
-    const lastGridY = Math.max(4, height - labelHeight - 4);
-    const gridXs = [];
-    for (let x = 4; x <= lastGridX; x += labelWidth + 8) gridXs.push(x);
-    if (gridXs.at(-1) !== lastGridX) gridXs.push(lastGridX);
-    for (let y = 4; y <= lastGridY; y += labelHeight + 6) {
-      gridXs.forEach((x) => candidates.push({ x, y }));
-    }
-    if ((lastGridY - 4) % (labelHeight + 6) !== 0) {
-      gridXs.forEach((x) => candidates.push({ x, y: lastGridY }));
-    }
-
-    const scored = candidates.map((candidate) => {
-      const rectangle = {
-        x: clamp(candidate.x, 4, Math.max(4, width - labelWidth - 4)),
-        y: clamp(candidate.y, 4, Math.max(4, height - labelHeight - 4)),
-        width: labelWidth,
-        height: labelHeight,
-      };
-      const labelOverlap = occupied.reduce((sum, placed) => sum + overlapArea(rectangle, placed), 0);
-      const coveredPoints = points.filter((point) => point.id !== model.id
-        && point.x >= rectangle.x - 8 && point.x <= rectangle.x + rectangle.width + 8
-        && point.y >= rectangle.y - 8 && point.y <= rectangle.y + rectangle.height + 8).length;
-      const clampDistance = Math.abs(rectangle.x - candidate.x) + Math.abs(rectangle.y - candidate.y);
-      const centerX = rectangle.x + rectangle.width / 2;
-      const centerY = rectangle.y + rectangle.height / 2;
-      const leaderDistance = Math.hypot(centerX - pointX, centerY - pointY);
-      return {
-        rectangle,
-        labelOverlap,
-        penalty: labelOverlap * 1000 + coveredPoints * 50000 + clampDistance * 30 + leaderDistance,
-      };
-    }).sort((a, b) => {
-      if ((a.labelOverlap === 0) !== (b.labelOverlap === 0)) return a.labelOverlap === 0 ? -1 : 1;
-      return a.penalty - b.penalty;
-    });
-
-    const rectangle = scored[0].rectangle;
-    if (scored[0].labelOverlap > 0) return;
-    occupied.push(rectangle);
-    label.style.left = `${rectangle.x}px`;
-    label.style.top = `${rectangle.y}px`;
-    label.style.visibility = "visible";
-
-    const anchorX = clamp(pointX, rectangle.x, rectangle.x + rectangle.width);
-    const anchorY = clamp(pointY, rectangle.y, rectangle.y + rectangle.height);
-    const deltaX = anchorX - pointX;
-    const deltaY = anchorY - pointY;
-    leader.style.left = `${pointX}px`;
-    leader.style.top = `${pointY}px`;
-    leader.style.width = `${Math.hypot(deltaX, deltaY)}px`;
-    leader.style.transform = `rotate(${Math.atan2(deltaY, deltaX)}rad)`;
-    leader.style.visibility = "visible";
-  });
+  return [
+    ...frontier.map((model, index) => ({ model, kind: "frontier", marker: String(index + 1) })),
+    ...alternatives.map((model, index) => ({ model, kind: "alternative", marker: String.fromCharCode(65 + index) })),
+  ];
 }
 
-function labeledModels(plotted) {
-  const automatic = hasActiveModelFilters()
-    ? plotted.slice(0, FILTERED_LABEL_LIMIT)
-    : plotted.filter((model) => isFrontier(model));
-  const plottedById = new Map(plotted.map((model) => [model.id, model]));
-  const ids = [...automatic.map((model) => model.id), state.activeId, state.hoverId].filter(Boolean);
-  return [...new Set(ids)].map((id) => plottedById.get(id)).filter(Boolean);
+function renderPlotIndex(entries) {
+  const groups = [
+    { kind: "frontier", title: "Pareto frontier" },
+    { kind: "alternative", title: "Closest alternatives" },
+  ];
+  $("#plot-index").innerHTML = groups.map((group) => {
+    const items = entries.filter((entry) => entry.kind === group.kind);
+    if (!items.length) return "";
+    return `<section class="plot-index-group"><h3>${group.title}</h3>${items.map(({ model, marker, kind }) => `
+      <button type="button" class="plot-index-row ${kind}" data-index-id="${escapeHtml(model.id)}" aria-label="Inspect ${escapeHtml(model.name)}">
+        <span class="plot-index-marker">${marker}</span>
+        <span class="plot-index-name">${escapeHtml(chartModelLabel(model))}</span>
+        <span class="plot-index-value">${scoreText(modelScore(model))} · ${money(modelCost(model))}${state.costMode === "token" ? "/M" : "/task"}</span>
+      </button>`).join("")}</section>`;
+  }).join("");
 }
 
 function syncInteraction() {
@@ -344,9 +260,9 @@ function syncInteraction() {
     point.classList.toggle("active", point.dataset.modelId === state.activeId);
     point.classList.toggle("hovered", point.dataset.modelId === focusedId);
   });
-  $("#plot").querySelectorAll("[data-model-label-id]").forEach((label) => {
-    label.classList.toggle("active", label.dataset.modelLabelId === state.activeId);
-    label.classList.toggle("hovered", label.dataset.modelLabelId === focusedId);
+  $("#plot-index").querySelectorAll("[data-index-id]").forEach((row) => {
+    row.classList.toggle("active", row.dataset.indexId === state.activeId);
+    row.classList.toggle("hovered", row.dataset.indexId === focusedId);
   });
   $("#model-rows").querySelectorAll("[data-row-id]").forEach((row) => {
     const selected = row.dataset.rowId === state.activeId;
@@ -355,7 +271,6 @@ function syncInteraction() {
     row.setAttribute("aria-selected", String(selected));
   });
 
-  placePointLabels(labeledModels(plotted), plotted, floor, ceiling);
   updateTooltip(plotted, floor, ceiling);
 }
 
@@ -386,12 +301,14 @@ function renderChart(models) {
   const plotted = models.filter((model) => modelScore(model) != null && modelCost(model) != null && modelScore(model) >= floor);
   const frontier = state.data.models.filter((model) => isFrontier(model) && modelScore(model) != null && modelCost(model) != null && modelScore(model) >= floor).sort((a, b) => modelCost(a) - modelCost(b));
   const path = frontier.map((model, index) => `${index ? "L" : "M"} ${xPercent(modelCost(model))} ${yPercent(modelScore(model), floor, ceiling)}`).join(" ");
+  const indexed = indexedModels(plotted);
+  const indexById = new Map(indexed.map((entry) => [entry.model.id, entry]));
 
   $("#token-cost").setAttribute("aria-pressed", String(state.costMode === "token"));
   $("#task-cost").setAttribute("aria-pressed", String(state.costMode === "task"));
   $("#near-range").setAttribute("aria-pressed", String(!state.showFullRange));
   $("#full-range").setAttribute("aria-pressed", String(state.showFullRange));
-  $("#chart-title").textContent = `${spec.label} vs. ${cost.title}`;
+  $("#chart-title").textContent = `${spec.shortLabel} by cost`;
   $("#chart-subtitle").textContent = `${state.showFullRange ? "All scored models" : "Focused on the Opus 4.8 neighborhood"} · ${spec.shortLabel} frontier · ${cost.shortLabel} · log cost scale`;
   $("#y-title").textContent = spec.label;
   $("#x-title").textContent = cost.axisLabel;
@@ -405,15 +322,16 @@ function renderChart(models) {
       : "",
     `<svg class="frontier-line" viewBox="0 0 100 100" preserveAspectRatio="none" aria-hidden="true"><path d="${path}"></path></svg>`,
     ...plotted.map((model) => {
-      const classes = ["model-point", isFrontier(model) && "frontier", model.promotion_discount != null && "promo", state.activeId === model.id && "active"].filter(Boolean).join(" ");
-      return `<button type="button" class="${classes}" data-model-id="${escapeHtml(model.id)}" style="left:${xPercent(modelCost(model))}%;top:${yPercent(modelScore(model), floor, ceiling)}%" aria-label="${escapeHtml(`${model.name}, ${spec.label} ${scoreText(modelScore(model))}, ${money(modelCost(model))} ${cost.unitLabel}`)}"></button>`;
+      const entry = indexById.get(model.id);
+      const classes = ["model-point", entry && "indexed", entry?.kind, model.promotion_discount != null && "promo", state.activeId === model.id && "active"].filter(Boolean).join(" ");
+      return `<button type="button" class="${classes}" data-model-id="${escapeHtml(model.id)}" style="left:${xPercent(modelCost(model))}%;top:${yPercent(modelScore(model), floor, ceiling)}%" aria-label="${escapeHtml(`${model.name}, ${spec.label} ${scoreText(modelScore(model))}, ${money(modelCost(model))} ${cost.unitLabel}`)}">${entry?.marker ?? ""}</button>`;
     }),
-    ...plotted.map((model) => `<i aria-hidden="true" class="model-leader" data-model-leader-id="${escapeHtml(model.id)}"></i><button type="button" class="model-label ${state.activeId === model.id ? "active" : ""}" data-model-label-id="${escapeHtml(model.id)}" aria-label="Inspect ${escapeHtml(model.name)}"><span>${escapeHtml(chartModelLabel(model))}</span><small>${scoreText(modelScore(model))} ${escapeHtml(spec.chartShort)} <b>·</b> ${money(modelCost(model))}${state.costMode === "token" ? "/M" : "/task"}</small></button>`),
   ].join("");
+  renderPlotIndex(indexed);
 
   chartContext = { plotted, floor, ceiling };
-  plot.querySelectorAll("[data-model-id], [data-model-label-id]").forEach((target) => {
-    const id = target.dataset.modelId ?? target.dataset.modelLabelId;
+  document.querySelectorAll("[data-model-id], [data-index-id]").forEach((target) => {
+    const id = target.dataset.modelId ?? target.dataset.indexId;
     target.addEventListener("mouseenter", () => setHoverId(id));
     target.addEventListener("mouseleave", () => clearHoverId(id));
     target.addEventListener("focus", () => setHoverId(id));
